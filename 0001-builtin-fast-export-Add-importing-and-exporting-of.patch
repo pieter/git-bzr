@@ -1,0 +1,252 @@
+From df6a7ff7ac55d320afa1b8a59393122d6ca0f6c4 Mon Sep 17 00:00:00 2001
+From: Pieter de Bie <pdebie@ai.rug.nl>
+Date: Wed, 11 Jun 2008 13:17:04 +0200
+Subject: [PATCH] builtin-fast-export: Add importing and exporting of revision marks
+
+This adds the --import-marks and --export-marks to fast-export. These import
+and export the marks used to for all revisions exported in a similar fashion
+to what fast-import does. The format is the same as fast-import, so you can
+create a bidirectional importer / exporter by using the same marks file on
+both sides.
+
+Signed-off-by: Pieter de Bie <pdebie@ai.rug.nl>
+Signed-off-by: Junio C Hamano <gitster@pobox.com>
+---
+ Documentation/git-fast-export.txt |   20 +++++++
+ builtin-fast-export.c             |   99 ++++++++++++++++++++++++++++++++++--
+ t/t9301-fast-export.sh            |   24 +++++++++
+ 3 files changed, 137 insertions(+), 6 deletions(-)
+
+diff --git a/Documentation/git-fast-export.txt b/Documentation/git-fast-export.txt
+index 332346c..277a547 100644
+--- a/Documentation/git-fast-export.txt
++++ b/Documentation/git-fast-export.txt
+@@ -36,6 +36,26 @@ when encountering a signed tag.  With 'strip', the tags will be made
+ unsigned, with 'verbatim', they will be silently exported
+ and with 'warn', they will be exported, but you will see a warning.
+ 
++--export-marks=<file>::
++	Dumps the internal marks table to <file> when complete.
++	Marks are written one per line as `:markid SHA-1`. Only marks
++	for revisions are dumped; marks for blobs are ignored.
++	Backends can use this file to validate imports after they
++	have been completed, or to save the marks table across
++	incremental runs.  As <file> is only opened and truncated
++	at completion, the same path can also be safely given to
++	\--import-marks.
++
++--import-marks=<file>::
++	Before processing any input, load the marks specified in
++	<file>.  The input file must exist, must be readable, and
++	must use the same format as produced by \--export-marks.
+++
++Any commits that have already been marked will not be exported again.
++If the backend uses a similar \--import-marks file, this allows for
++incremental bidirectional exporting of the repository by keeping the
++marks the same across runs.
++
+ 
+ EXAMPLES
+ --------
+diff --git a/builtin-fast-export.c b/builtin-fast-export.c
+index d0a462f..45786ef 100644
+--- a/builtin-fast-export.c
++++ b/builtin-fast-export.c
+@@ -56,10 +56,24 @@ static int has_unshown_parent(struct commit *commit)
+ }
+ 
+ /* Since intptr_t is C99, we do not use it here */
+-static void mark_object(struct object *object)
++static inline uint32_t *mark_to_ptr(uint32_t mark)
+ {
+-	last_idnum++;
+-	add_decoration(&idnums, object, ((uint32_t *)NULL) + last_idnum);
++	return ((uint32_t *)NULL) + mark;
++}
++
++static inline uint32_t ptr_to_mark(void * mark)
++{
++	return (uint32_t *)mark - (uint32_t *)NULL;
++}
++
++static inline void mark_object(struct object *object, uint32_t mark)
++{
++	add_decoration(&idnums, object, mark_to_ptr(mark));
++}
++
++static inline void mark_next_object(struct object *object)
++{
++	mark_object(object, ++last_idnum);
+ }
+ 
+ static int get_object_mark(struct object *object)
+@@ -67,7 +81,7 @@ static int get_object_mark(struct object *object)
+ 	void *decoration = lookup_decoration(&idnums, object);
+ 	if (!decoration)
+ 		return 0;
+-	return (uint32_t *)decoration - (uint32_t *)NULL;
++	return ptr_to_mark(decoration);
+ }
+ 
+ static void show_progress(void)
+@@ -100,7 +114,7 @@ static void handle_object(const unsigned char *sha1)
+ 	if (!buf)
+ 		die ("Could not read blob %s", sha1_to_hex(sha1));
+ 
+-	mark_object(object);
++	mark_next_object(object);
+ 
+ 	printf("blob\nmark :%d\ndata %lu\n", last_idnum, size);
+ 	if (size && fwrite(buf, size, 1, stdout) != 1)
+@@ -185,7 +199,7 @@ static void handle_commit(struct commit *commit, struct rev_info *rev)
+ 	for (i = 0; i < diff_queued_diff.nr; i++)
+ 		handle_object(diff_queued_diff.queue[i]->two->sha1);
+ 
+-	mark_object(&commit->object);
++	mark_next_object(&commit->object);
+ 	if (!is_encoding_utf8(encoding))
+ 		reencoded = reencode_string(message, "UTF-8", encoding);
+ 	if (!commit->parents)
+@@ -354,18 +368,85 @@ static void handle_tags_and_duplicates(struct path_list *extra_refs)
+ 	}
+ }
+ 
++static void export_marks(char *file)
++{
++	unsigned int i;
++	uint32_t mark;
++	struct object_decoration *deco = idnums.hash;
++	FILE *f;
++
++	f = fopen(file, "w");
++	if (!f)
++		error("Unable to open marks file %s for writing", file);
++
++	for (i = 0; i < idnums.size; ++i) {
++		deco++;
++		if (deco && deco->base && deco->base->type == 1) {
++			mark = ptr_to_mark(deco->decoration);
++			fprintf(f, ":%u %s\n", mark, sha1_to_hex(deco->base->sha1));
++		}
++	}
++
++	if (ferror(f) || fclose(f))
++		error("Unable to write marks file %s.", file);
++}
++
++static void import_marks(char * input_file)
++{
++	char line[512];
++	FILE *f = fopen(input_file, "r");
++	if (!f)
++		die("cannot read %s: %s", input_file, strerror(errno));
++
++	while (fgets(line, sizeof(line), f)) {
++		uint32_t mark;
++		char *line_end, *mark_end;
++		unsigned char sha1[20];
++		struct object *object;
++
++		line_end = strchr(line, '\n');
++		if (line[0] != ':' || !line_end)
++			die("corrupt mark line: %s", line);
++		*line_end = 0;
++
++		mark = strtoumax(line + 1, &mark_end, 10);
++		if (!mark || mark_end == line + 1
++			|| *mark_end != ' ' || get_sha1(mark_end + 1, sha1))
++			die("corrupt mark line: %s", line);
++
++		object = parse_object(sha1);
++		if (!object)
++			die ("Could not read blob %s", sha1_to_hex(sha1));
++
++		if (object->flags & SHOWN)
++			error("Object %s already has a mark", sha1);
++
++		mark_object(object, mark);
++		if (last_idnum < mark)
++			last_idnum = mark;
++
++		object->flags |= SHOWN;
++	}
++	fclose(f);
++}
++
+ int cmd_fast_export(int argc, const char **argv, const char *prefix)
+ {
+ 	struct rev_info revs;
+ 	struct object_array commits = { 0, 0, NULL };
+ 	struct path_list extra_refs = { NULL, 0, 0, 0 };
+ 	struct commit *commit;
++	char *export_filename = NULL, *import_filename = NULL;
+ 	struct option options[] = {
+ 		OPT_INTEGER(0, "progress", &progress,
+ 			    "show progress after <n> objects"),
+ 		OPT_CALLBACK(0, "signed-tags", &signed_tag_mode, "mode",
+ 			     "select handling of signed tags",
+ 			     parse_opt_signed_tag_mode),
++		OPT_STRING(0, "export-marks", &export_filename, "FILE",
++			     "Dump marks to this file"),
++		OPT_STRING(0, "import-marks", &import_filename, "FILE",
++			     "Import marks from this file"),
+ 		OPT_END()
+ 	};
+ 
+@@ -378,6 +459,9 @@ int cmd_fast_export(int argc, const char **argv, const char *prefix)
+ 	if (argc > 1)
+ 		usage_with_options (fast_export_usage, options);
+ 
++	if (import_filename)
++		import_marks(import_filename);
++
+ 	get_tags_and_duplicates(&revs.pending, &extra_refs);
+ 
+ 	if (prepare_revision_walk(&revs))
+@@ -400,5 +484,8 @@ int cmd_fast_export(int argc, const char **argv, const char *prefix)
+ 
+ 	handle_tags_and_duplicates(&extra_refs);
+ 
++	if (export_filename)
++		export_marks(export_filename);
++
+ 	return 0;
+ }
+diff --git a/t/t9301-fast-export.sh b/t/t9301-fast-export.sh
+index f09bfb1..60b5ee3 100755
+--- a/t/t9301-fast-export.sh
++++ b/t/t9301-fast-export.sh
+@@ -78,6 +78,30 @@ test_expect_success 'iso-8859-1' '
+ 		 git cat-file commit i18n | grep "Áéí óú")
+ 
+ '
++test_expect_success 'import/export-marks' '
++
++	git checkout -b marks master &&
++	git fast-export --export-marks=tmp-marks HEAD &&
++	test -s tmp-marks &&
++	cp tmp-marks ~ &&
++	test $(wc -l < tmp-marks) -eq 3 &&
++	test $(
++		git fast-export --import-marks=tmp-marks\
++		--export-marks=tmp-marks HEAD |
++		grep ^commit |
++		wc -l) \
++	-eq 0 &&
++	echo change > file &&
++	git commit -m "last commit" file &&
++	test $(
++		git fast-export --import-marks=tmp-marks \
++		--export-marks=tmp-marks HEAD |
++		grep ^commit\  |
++		wc -l) \
++	-eq 1 &&
++	test $(wc -l < tmp-marks) -eq 4
++
++'
+ 
+ cat > signed-tag-import << EOF
+ tag sign-your-name
+-- 
+1.5.6.140.gaaae8
+
