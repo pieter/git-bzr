@@ -1,7 +1,9 @@
 #!/usr/bin/env ruby
 require 'fileutils'
-command = ARGV.shift
+EXPORT_LOCATION = "~/.bazaar/plugins/fastimport/exporters/bzr-fast-export.py"
+PYTHON = ENV["PYTHON"] || "/opt/local/bin/python2.5"
 
+command = ARGV.shift
 commands = [:add, :push, :fetch, :pull]
 
 if !command || !commands.include?(command.to_sym)
@@ -63,11 +65,11 @@ class BzrCommands
       print "There doesn't seem to be an existing refmap. "
       puts "Doing an initial import"
       FileUtils.makedirs(File.dirname(git_map))
-      `(/opt/local/bin/python2.5 ~/bzr-pieter/exporters/bzr-fast-export.py --export-marks=#{bzr_map} --git-branch=bzr/#{remote} #{location}) | (git fast-import --export-marks=#{git_map})`
+      `(#{PYTHON} #{EXPORT_LOCATION} --export-marks=#{bzr_map} --git-branch=bzr/#{remote} #{location}) | (git fast-import --export-marks=#{git_map})`
     elsif File.exists?(git_map) && File.exists?(bzr_map)
       puts "Updating remote #{remote}"
       old_rev = `git rev-parse bzr/#{remote}`
-      `(/opt/local/bin/python2.5 ~/bzr-pieter/exporters/bzr-fast-export.py --import-marks=#{bzr_map} --export-marks=#{bzr_map} --git-branch=bzr/#{remote} #{location}) | (git fast-import --quiet --export-marks=#{git_map} --import-marks=#{git_map})`
+      `(#{PYTHON} #{EXPORT_LOCATION} --import-marks=#{bzr_map} --export-marks=#{bzr_map} --git-branch=bzr/#{remote} #{location}) | (git fast-import --quiet --export-marks=#{git_map} --import-marks=#{git_map})`
       new_rev = `git rev-parse bzr/#{remote}`
       puts "Changes since last update:"
       puts `git shortlog #{old_rev.strip}..#{new_rev.strip}`
