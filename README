@@ -17,7 +17,7 @@ An example session goes like this:
 
 ## How should I install it?
 
-You need a new Git (v 1.6.0-rc0 or higher). As 1.6.0 is not released at this time, I included a patch that you can apply to the git source to get the required functionality. Using Git from the 'master' branch or 'next' will also work.
+You need a new Git (v 1.6.0 or higher). If you have an older Git version, you can get git-bzr to run by applying the patch in this repository to your Git source code.
 
 Furthermore, you need the Bazaar fastimport plugin. It can be found at https://launchpad.net/bzr-fastimport.
 
