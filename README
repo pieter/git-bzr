@@ -27,6 +27,8 @@ Finally, you need to install the git-bzr script, which is written in Ruby, somew
 
 I'm not really interested in working on this anymore, as it fulfills my need. However, I can understand someone else might want to try the same, so I put the code online to avoid double work.
 
+NOTE: I really mean what I say here above -- I'm no longer interested in this program. Take it as it is, or look at one of the forks on github (there are two that have converted the script to bash, if you prefer that).
+
 ## How is it licensed?
 
 The Git patch is a derivative of the Git source and is thus licensed under Git's license (GPL v2.0 only). The Bazaar fastimport changes are covered under the same license as the rest of the fastimport plugin. The git-bzr script is licensed under the same license as Git.
